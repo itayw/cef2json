@@ -1,0 +1,13 @@
+[package]
+name = "cef2json"
+version = "1.0.0"
+edition  = "2021"
+author = "Itay Weinberger <itay@brutebrothers.com>"
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rayon = "1.5.1"
+ocl = "0.19"
+num-format = "0.4"
+rand = "0.8"
+lazy_static = "1.4.0"
