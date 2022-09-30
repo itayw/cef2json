@@ -2,6 +2,8 @@
 
 This is a Proof-of-Concept (POC) for parsing ArcSight CEF securtiy log records with the assistance of GPUs.
 
+TLDR; an initial result of **x30 more events per second using GPUs** for log streaming/processing of CEF events.
+
 CEF is very similar to the basic `syslog` format, the main goal of the parser is to turn the raw textual data into a better data format for future handling, such as json. there are a few differences to the syslog/CEF standards, so normal syslog parsers cannot be used for this task. There are several parsers out there as part of data shipping suites, such as: Logstash, fluentd, Splunk collectors and you can also find open source libraries for the purpose of CEF parsing. 
 
 You can learn more about the CEF format [here](https://community.microfocus.com/cyberres/productdocs/w/connector-documentation/38809/arcsight-common-event-format-cef-implementation-standard). 
