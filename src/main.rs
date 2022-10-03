@@ -26,7 +26,10 @@ fn main() {
         };
     }
 
-    println!("Found {} GPU devices, will use only 1 for this POC, compiling kernel...", devices.len());
+    println!(
+        "Found {} GPU devices, will use only 1 for this POC, compiling kernel...",
+        devices.len()
+    );
     let src = r#"
                 __kernel void kernel_cefparser(__global const uchar * input, __global uchar * output) {
                     ulong idx = get_global_id(0);
@@ -39,13 +42,13 @@ fn main() {
                         output_classification = 1;
                     }
                     else if (char_to_inspect == ' ') {
-                    output_classification = 4;
+                        output_classification = 4;
                     }
                     else if (char_to_inspect == '\n') {
-                    output_classification = 5;
+                        output_classification = 5;
                     }
                     else if (char_to_inspect == '|') {
-                    output_classification = 2;
+                        output_classification = 2;
                     }
                     output[idx] = output_classification;
                 }
@@ -152,6 +155,7 @@ fn main() {
                                     }
                                 }
                                 if i + 1 >= pos.len() {
+                                    end = work_stdin[msg_idx].len();
                                 } else {
                                     let last = pos[i + 1];
                                     for i in (*p..last).rev() {
@@ -160,18 +164,17 @@ fn main() {
                                             break;
                                         }
                                     }
-
-                                    json.push_str("\"");
-                                    json.push_str(&work_stdin[msg_idx][start..*p]);
-                                    json.push_str("\":");
-                                    json.push_str("\"");
-                                    json.push_str(&work_stdin[msg_idx][*p + 1..end]);
-                                    json.push_str("\",");
                                 }
+                                json.push_str("\"");
+                                json.push_str(&work_stdin[msg_idx][start..*p]);
+                                json.push_str("\":");
+                                json.push_str("\"");
+                                json.push_str(&work_stdin[msg_idx][*p + 1..end]);
+                                json.push_str("\",");
                             }
                             json.truncate(json.len() - 1);
                             json.push('}');
-                            //println!("{}", json);
+                            println!("{}", json);
                             msg_idx += 1;
                         }
                     }
@@ -204,7 +207,7 @@ fn main() {
 lazy_static! {
     static ref CEF_SAMPLE: Vec<&'static str> = {
         let cef_sample: Vec<&'static str> = [
-        "<134>2022-02-14T03:17:30-08:00 TEST CEF:0|Vendor|Product|20.0.560|600|User Signed In|3|src=127.0.0.1 suser=Admin target=Admin msg=User signed in from 127.0.0.1 Tenant=Primary TenantId=0 act=",
+        "<134>2022-02-14T03:17:30-08:00 TEST CEF:0|Vendor|Product|20.0.560|600|User Signed In|3|src=127.0.0.1 suser=Admin target=Admin msg=User signed in from 127.0.0.1 Tenant=Primary TenantId=איתי act=",
         "<134>Feb 14 19:04:54 CEF:0|Vendor|Product|20.0.560|600|User Signed In|3|src=127.0.0.1 suser=Admin target=Admin msg=User signed in from 127.0.0.1 Tenant=Primary TenantId=0 act=",
         "<134>Feb 14 19:04:54 TEST CEF:0|Vendor|Product|20.0.560|600|User Signed In|3|src=127.0.0.1 suser=Admin target=Admin msg=User signed in from 127.0.0.1 Tenant=Primary TenantId=0 act=",
         "<134>2022-02-14T03:17:30-08:00 CEF:0|Vendor|Product|20.0.560|600|User Signed In|3|src=127.0.0.1 suser=Admin target=Admin msg=User signed in from 127.0.0.1 Tenant=Primary TenantId=0 act=",
@@ -254,7 +257,7 @@ pub fn get_device_count() -> usize {
 fn flatten_strings(ss: impl Iterator<Item = &'static str>) -> Vec<u8> {
     let mut res = Vec::new();
     for s in ss {
-        res.extend(s.chars().map(|x| x as u8));
+        res.extend(s.as_bytes());
         res.extend(['\n' as u8]);
     }
     res
