@@ -1,212 +1,110 @@
 #[macro_use]
 extern crate lazy_static;
 
+use crossbeam_channel::bounded;
+use crossbeam_queue::ArrayQueue;
 use num_format::{Locale, ToFormattedString};
 use ocl::builders::ContextProperties;
 use ocl::prm::cl_uchar;
 use ocl::{core, flags, Platform};
 use rand::Rng;
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::ffi::CString;
+use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 const STAT_INTERVAL: u64 = 3;
 
 fn main() {
-    let mut devices = vec![];
-    let mut platform_id = Platform::default();
-    let platforms = Platform::list();
-    for platform in platforms {
-        match core::get_device_ids(&platform, Some(ocl::flags::DEVICE_TYPE_GPU), None) {
-            Ok(device_ids) => {
-                devices = [devices, device_ids].concat();
-                platform_id = platform;
-            }
-            Err(_) => {}
-        };
-    }
+    let chunk_size = 10000;
+    let mut start = Instant::now();
 
-    println!(
-        "Found {} GPU devices, will use only 1 for this POC, compiling kernel...",
-        devices.len()
-    );
-    let src = r#"
-                __kernel void kernel_cefparser(__global const uchar * input, __global uchar * output) {
-                    ulong idx = get_global_id(0);
-                
-                    uchar prev_char_to_inspect = input[idx-1];
-                    uchar char_to_inspect = input[idx];
-                    uchar output_classification = 0;
-                
-                    if (char_to_inspect == '=' && prev_char_to_inspect != '\\') {
-                        output_classification = 1;
-                    }
-                    else if (char_to_inspect == ' ') {
-                        output_classification = 4;
-                    }
-                    else if (char_to_inspect == '\n') {
-                        output_classification = 5;
-                    }
-                    else if (char_to_inspect == '|') {
-                        output_classification = 2;
-                    }
-                    output[idx] = output_classification;
-                }
-            "#;
-    let src_cstring = CString::new(src).unwrap();
+    let mut total_counter = 0;
+    let mut total_bytes = 0.0;
+    let mut counter = 0;
+    let mut bytes = 0;
 
-    devices
-        .into_par_iter()
-        //.skip(1)
-        .take(1)
-        .for_each(move |device_id| {
-            let mut start = Instant::now();
+    let mut work_size = 0;
 
-            let mut total_counter = 0;
-            let mut total_bytes: f32 = 0.0;
+    loop {
+        let work_stdin = get_work(chunk_size as u32);
+        let _chunk_size = work_stdin.len();
 
-            println!("device {:?} loading", device_id);
-            let context_properties = ContextProperties::new().platform(platform_id);
-            let device_spec = ocl::builders::DeviceSpecifier::from(device_id);
-            let device = ocl::Device::from(device_id);
-            let context = ocl::Context::builder()
-                .properties(context_properties)
-                .devices(device_spec)
-                .build()
-                .unwrap();
+        if _chunk_size > 0 {
+            work_stdin.par_iter().for_each(|work| {
+                let work = *work;
+                //println!("work {}", work);
 
-            let queue = ocl::Queue::new(&context, device, None).unwrap();
-            let program = ocl::Program::with_source(
-                &context,
-                &[src_cstring.clone()],
-                Some(&[device]),
-                &CString::new("").unwrap(),
-            )
-            .unwrap();
-
-            let kernel = ocl::Kernel::builder()
-                .program(&program)
-                .name("kernel_cefparser")
-                .arg_named("input", None::<&ocl::Buffer<cl_uchar>>)
-                .arg_named("output", None::<&ocl::Buffer<cl_uchar>>)
-                .build()
-                .unwrap();
-
-            let mut chunk_size = 1_000_000;
-            let mut counter = 0;
-            let mut bytes = 0;
-
-            loop {
-                let work_stdin = get_work(chunk_size as u32);
-                let mut _chunk_size = work_stdin.len();
-                if _chunk_size > 0 {
-                    let input = flatten_strings(work_stdin.clone().into_iter());
-                    let input_buf = ocl::Buffer::builder()
-                        .context(&context)
-                        .flags(flags::MEM_READ_ONLY | flags::MEM_COPY_HOST_PTR)
-                        .copy_host_slice(&input)
-                        .len(input.len())
-                        .build()
-                        .unwrap();
-                    let mut output: Vec<cl_uchar> = vec![0 as cl_uchar; input.len()];
-                    let output_buf = ocl::Buffer::builder()
-                        .context(&context)
-                        .flags(flags::MEM_WRITE_ONLY | flags::MEM_COPY_HOST_PTR)
-                        .copy_host_slice(&output)
-                        .len(output.len())
-                        .build()
-                        .unwrap();
-                    chunk_size = work_stdin.len() as u128;
-
-                    kernel.set_arg("input", &input_buf).unwrap();
-                    kernel.set_arg("output", &output_buf).unwrap();
-
-                    unsafe {
-                        kernel
-                            .cmd()
-                            .global_work_size(
-                                ocl::SpatialDims::new(Some(input.len() as usize), None, None)
-                                    .unwrap(),
-                            )
-                            .queue(&queue)
-                            .enq()
-                            .unwrap();
-                        output_buf.read(&mut output).queue(&queue).enq().unwrap();
-                        let mut msg_idx = 0;
-                        for msg in output.split(|x| *x == 5) {
-                            if msg.len() == 0 {
-                                continue;
-                            }
-
-                            let pos: Vec<usize> = msg
-                                .iter()
-                                .enumerate()
-                                .filter_map(|(idx, val)| if *val == 1 { Some(idx) } else { None })
-                                .collect();
-
-                            let mut json = "{".to_string();
-                            for (i, p) in pos.iter().enumerate() {
-                                let mut start = 0;
-                                let mut end = 0;
-                                for i in (0..*p).rev().step_by(1) {
-                                    if msg[i] == 4 || msg[i] == 2 {
-                                        start = i + 1;
-                                        break;
-                                    }
-                                }
-                                if i + 1 >= pos.len() {
-                                    end = work_stdin[msg_idx].len();
-                                } else {
-                                    let last = pos[i + 1];
-                                    for i in (*p..last).rev() {
-                                        if msg[i] == 4 {
-                                            end = i;
-                                            break;
-                                        }
-                                    }
-                                }
-                                json.push_str("\"");
-                                json.push_str(&work_stdin[msg_idx][start..*p]);
-                                json.push_str("\":");
-                                json.push_str("\"");
-                                json.push_str(&work_stdin[msg_idx][*p + 1..end]);
-                                json.push_str("\",");
-                            }
-                            json.truncate(json.len() - 1);
-                            json.push('}');
-                            println!("{}", json);
-                            msg_idx += 1;
+                let idx = work
+                    .chars()
+                    .enumerate()
+                    .map(|(i, x)| {
+                        if x == '|' && work.chars().nth(i - 1).unwrap() != '\\' {
+                            1
+                        } else {
+                            0
                         }
-                    }
+                    })
+                    .collect::<Vec<usize>>();
 
-                    let duration = start.elapsed();
-                    total_counter += chunk_size;
-                    total_bytes += input.len() as f32 / 1024.0 / 1024.0 / 1024.0;
+                //split the header away
+                let idx = work
+                    .chars()
+                    .enumerate()
+                    .filter_map(|(i, x)| {
+                        if x == '|' && work.chars().nth(i - 1).unwrap() != '\\' {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<usize>>();
+                let cef_start = idx[idx.len() - 1];
+                let header = &work[..cef_start];
+                let cef_message = &work[cef_start + 1..];
 
-                    counter += chunk_size;
-                    bytes += input.len();
+                let idx = cef_message
+                    .chars()
+                    .enumerate()
+                    .filter_map(|(i, x)| {
+                        if x == '=' && work.chars().nth(i - 1).unwrap() != '\\' {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<usize>>();
+                //println!("{:?}::::{:?}", idx,cef_message);
 
-                    if duration > Duration::from_secs(STAT_INTERVAL) {
-                        eprintln!(
-                            "Processed: {} events/{} gb, EPS {} events/second, GBPS {} gb/second",
-                            total_counter.to_formatted_string(&Locale::en),
-                            total_bytes,
-                            counter as f32 / duration.as_secs_f32(),
-                            bytes as f32 / duration.as_secs_f32() / 1024.0 / 1024.0 / 1024.0,
-                        );
-                        start = Instant::now();
-                        counter = 0;
-                        bytes = 0;
-                    }
-                }
-            }
-        });
-    //println!("GPU done, elapsed: {:?}ms.", start.elapsed().as_millis());
+                //parse header
+            });
+        }
+        let duration = start.elapsed();
+        total_counter += chunk_size;
+        total_bytes += work_size as f32 / 1024.0 / 1024.0 / 1024.0;
+
+        counter += chunk_size;
+        bytes += work_size;
+        if duration > Duration::from_secs(STAT_INTERVAL) {
+            eprintln!(
+                "Processed: {} events/{} gb, EPS {} events/second, GBPS {} gb/second",
+                total_counter.to_formatted_string(&Locale::en),
+                total_bytes,
+                counter as f32 / duration.as_secs_f32(),
+                bytes as f32 / duration.as_secs_f32() / 1024.0 / 1024.0 / 1024.0,
+            );
+            start = Instant::now();
+            counter = 0;
+            bytes = 0;
+        }
+    }
 }
 
 lazy_static! {
     static ref CEF_SAMPLE: Vec<&'static str> = {
         let cef_sample: Vec<&'static str> = [
+
         "<134>2022-02-14T03:17:30-08:00 TEST CEF:0|Vendor|Product|20.0.560|600|User Signed In|3|src=127.0.0.1 suser=Admin target=Admin msg=User signed in from 127.0.0.1 Tenant=Primary TenantId=איתי act=",
         "<134>Feb 14 19:04:54 CEF:0|Vendor|Product|20.0.560|600|User Signed In|3|src=127.0.0.1 suser=Admin target=Admin msg=User signed in from 127.0.0.1 Tenant=Primary TenantId=0 act=",
         "<134>Feb 14 19:04:54 TEST CEF:0|Vendor|Product|20.0.560|600|User Signed In|3|src=127.0.0.1 suser=Admin target=Admin msg=User signed in from 127.0.0.1 Tenant=Primary TenantId=0 act=",
