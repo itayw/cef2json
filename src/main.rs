@@ -6,7 +6,7 @@ use crossbeam_queue::ArrayQueue;
 use num_format::{Locale, ToFormattedString};
 use ocl::builders::ContextProperties;
 use ocl::core::Uint2;
-use ocl::prm::{cl_uchar, cl_uint};
+use ocl::prm::{cl_uchar, cl_uint, Uint3};
 use ocl::{core, flags, Platform};
 use rand::Rng;
 use rayon::prelude::*;
@@ -16,12 +16,6 @@ use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 const STAT_INTERVAL: u64 = 3;
-
-struct Positions {
-    start: usize,
-    end: usize,
-    idx: usize,
-}
 
 fn main() {
     let mut devices = vec![];
@@ -42,60 +36,49 @@ fn main() {
         devices.len()
     );
     let src = r#"
-                #pragma OPENCL EXTENSION cl_khr_int64_base_atomics : enable
-
-                int increase(__global int *addrCounter, int size) {
-                    return atomic_inc(addrCounter);
-                }
-
-                __kernel void kernel_indexes(__global uchar * in_out, __global uint * ln_count, __global uint * ln, __global uint * pairs_count, __global uint * pairs) {
+                __kernel void kernel_parser(__global uchar * input, __global uint * lengths, __global uint * starts, __global uint3 * output, __global uint * pair_counts) {
                     ulong idx = get_global_id(0);
+                    
+                    uint start = starts[idx];
+                    uint length = lengths[idx];
+                    uint end = start + length;
+                    uint key_block = 50;
 
-                    if (in_out[idx] == '=' && in_out[idx - 1] != '\\') {
-                        int fakePointer = increase(&pairs_count[0], 1); // serial operation
-                        pairs[fakePointer] = idx;
-                    }
-                    /*else if (in_out[idx] == '\n') {
-                        int fakePointer = increase(&ln_count[0], 1); // serial operation
-                        ln[fakePointer] = idx;
-                    }*/
-                }
+                    uint pair_count = 0;
+                    uint pair_start = 0;
+                    uint pair_end = end;
+                    uint pair_eq = 0;
+                    bool looking_for_pair_start = false;
 
-                __kernel void kernel_parts(__global uchar * in_out, __global uint * pairs, __global uint2 * pairs2) {
-                    ulong idx = get_global_id(0);
-                    ulong pair_idx = pairs[idx];
-                    uint distance = 0;
-                    for (int i = pair_idx ; i > pair_idx - 32 ; i--) {
-                        if (in_out[i] == ' ' || in_out[i] == '|') {
-                            pairs2[idx].s0 = pair_idx - distance + 1;
-                            if (idx - 1 > 0){
-                                pairs2[idx-1].s1 = pair_idx - distance;
-                            }
-                            break;
+                    for (int i = end; i > start ; i--) {
+                        if (input[i] == '=' && input[i-1] != '\\') {
+                            //we have an equal sign, let's look for a the complete keypair
+                            pair_eq = i;
+                            looking_for_pair_start = 1;
                         }
-                        
-                        distance++;
+                        if (looking_for_pair_start && (input[i] == ' ' || input[i] == '|')) {
+                            pair_start = i + 1;
+
+                            //we have a keypair, let's push it
+                            uint pos = (key_block * idx) + pair_count;
+
+                            uint3 result = {pair_start, pair_end, pair_eq};
+                            output[pos] = result;
+                            
+                            //init our vars for the next lookup
+                            looking_for_pair_start = false;
+                            pair_end = i;
+                            pair_start = 0;
+                            pair_eq = 0;
+
+                            pair_count++;
+                        }
                     }
-                }                
+
+                    pair_counts[idx] = pair_count;
+                }
             "#;
     let src_cstring = CString::new(src).unwrap();
-
-    /*
-    //let q = ArrayQueue::new(1_000_000);
-    let s: crossbeam_channel::Sender<(Vec<u8>, Vec<u8>)>;
-    let r: crossbeam_channel::Receiver<(Vec<u8>, Vec<u8>)>;
-    (s, r) = bounded(10_000_000);
-
-    std::thread::spawn(move || {
-        for _ in 1..8 {
-            loop {
-                let (in_out, work_stdin) = r.recv().unwrap();
-
-                //println!("{:?}", r.recv().unwrap());
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        }
-    });*/
 
     devices
         .into_par_iter()
@@ -107,9 +90,10 @@ fn main() {
             let mut total_counter = 0;
             let mut total_bytes: f32 = 0.0;
 
-            let chunk_size = 25000;
+            let chunk_size = 50000;
             let mut counter = 0;
             let mut bytes = 0;
+            let key_block = 50;
 
             println!("device {:?} loading", device_id);
             let context_properties = ContextProperties::new().platform(platform_id);
@@ -130,389 +114,135 @@ fn main() {
             )
             .unwrap();
 
-            let mut ln = vec![0 as cl_uint; chunk_size as usize]; //((_chunk_size as f64 * 0.0625) + 1.0)
-            let ln_buf = unsafe {
+            let mut output = vec![Uint3::default(); chunk_size * key_block];
+            let output_buf = unsafe {
                 ocl::Buffer::builder()
                     .context(&context)
                     .flags(flags::MEM_WRITE_ONLY)
-                    .use_host_slice(&ln)
-                    .len(ln.len())
+                    .use_host_slice(&output)
+                    .len(output.len())
                     .build()
                     .unwrap()
             };
-
-            let mut pairs = vec![0 as cl_uint; chunk_size * 256 as usize]; //((_chunk_size as f64 * 0.0625) + 1.0)
-            let pairs_buf = unsafe {
+            //println!("output {}ms", iteration_start.elapsed().as_millis());
+            //let mut pairs_count = vec![0 as cl_uint; chunk_size];
+            let pairs_count_buf = unsafe {
                 ocl::Buffer::builder()
-                    .context(&context)
+                    .queue(queue.clone())
                     .flags(flags::MEM_WRITE_ONLY)
-                    .use_host_slice(&pairs)
-                    .len(pairs.len())
+                    .fill_val(0 as cl_uint)
+                    .len(chunk_size)
                     .build()
                     .unwrap()
             };
 
             let kernel = ocl::Kernel::builder()
                 .program(&program)
-                .name("kernel_indexes")
-                .arg_named("in_out", None::<&ocl::Buffer<cl_uchar>>)
-                .arg_named("ln_count", None::<&ocl::Buffer<cl_uint>>)
-                .arg_named("ln", &ln_buf)
-                .arg_named("pairs_count", None::<&ocl::Buffer<cl_uint>>)
-                .arg_named("pairs", &pairs_buf)
+                .name("kernel_parser")
+                .arg_named("input", None::<&ocl::Buffer<cl_uchar>>)
+                .arg_named("lengths", None::<&ocl::Buffer<cl_uint>>)
+                .arg_named("starts", None::<&ocl::Buffer<cl_uint>>)
+                .arg_named("output", &output_buf)
+                .arg_named("pairs_count", &pairs_count_buf)
                 .build()
                 .unwrap();
 
-            let kernel_parts = ocl::Kernel::builder()
-                .program(&program)
-                .name("kernel_parts")
-                .arg_named("in_out", None::<&ocl::Buffer<cl_uchar>>)
-                .arg_named("pairs", &pairs_buf)
-                .arg_named("pairs2", None::<&ocl::Buffer<Uint2>>)
-                .build()
-                .unwrap();
             loop {
                 let work_stdin = get_work(chunk_size as u32);
                 let _chunk_size = work_stdin.len();
-                let mut work_size = 0;
-                let mut first = true;
+                //let mut work_size = 0;
+                //let mut first = true;
+
                 if _chunk_size > 0 {
-                    let mut in_out = flatten_strings(work_stdin.clone().into_iter());
+                    let mut iteration_start = Instant::now();
+                    let (mut input, (lengths, starts)) =
+                        flatten_strings(work_stdin.clone().into_iter());
+                    //println!("flatten {}ms", iteration_start.elapsed().as_millis());
                     unsafe {
-                        let in_out_buf = ocl::Buffer::builder()
+                        let input_buf = ocl::Buffer::builder()
                             .context(&context)
-                            .flags(flags::MEM_READ_WRITE)
-                            .use_host_slice(&in_out)
-                            //.copy_host_slice(&in_out)
-                            .len(in_out.len())
+                            .flags(flags::MEM_READ_ONLY)
+                            .use_host_slice(&input)
+                            .len(input.len())
                             .build()
                             .unwrap();
+                        //println!("input {}ms", iteration_start.elapsed().as_millis());
+                        let lengths_buf = ocl::Buffer::builder()
+                            .context(&context)
+                            .flags(flags::MEM_READ_ONLY)
+                            .use_host_slice(&lengths)
+                            .len(lengths.len())
+                            .build()
+                            .unwrap();
+                        //println!("lengths {}ms", iteration_start.elapsed().as_millis());
+                        let starts_buf = ocl::Buffer::builder()
+                            .context(&context)
+                            .flags(flags::MEM_READ_ONLY)
+                            .use_host_slice(&starts)
+                            .len(starts.len())
+                            .build()
+                            .unwrap();
+                        //println!("starts {}ms", iteration_start.elapsed().as_millis());
+                        //work_size = input.len();
 
-                        let mut ln_count = vec![0 as cl_uint; 1 as usize];
-                        let ln_count_buf = unsafe {
-                            ocl::Buffer::builder()
-                                .context(&context)
-                                .flags(flags::MEM_WRITE_ONLY)
-                                .use_host_slice(&ln_count)
-                                .len(ln_count.len())
-                                .build()
-                                .unwrap()
-                        };
+                        //println!("prep {}ms", iteration_start.elapsed().as_millis());
+                        kernel.set_arg("input", &input_buf).unwrap();
+                        kernel.set_arg("starts", &starts_buf).unwrap();
+                        kernel.set_arg("lengths", &lengths_buf).unwrap();
 
-                        let mut pairs_count = vec![0 as cl_uint; 1 as usize];
-                        let pairs_count_buf = unsafe {
-                            ocl::Buffer::builder()
-                                .context(&context)
-                                .flags(flags::MEM_WRITE_ONLY)
-                                .use_host_slice(&pairs_count)
-                                .len(pairs_count.len())
-                                .build()
-                                .unwrap()
-                        };
-
-                        work_size = in_out.len();
-                        let _input = in_out.clone();
-
-                        kernel.set_arg("in_out", &in_out_buf).unwrap();
-                        kernel.set_arg("ln_count", &ln_count_buf).unwrap();
-                        kernel.set_arg("pairs_count", &pairs_count_buf).unwrap();
+                        //println!("args {}ms", iteration_start.elapsed().as_millis());
 
                         kernel
                             .cmd()
                             .global_work_size(
-                                ocl::SpatialDims::new(Some(work_size as usize), None, None)
+                                ocl::SpatialDims::new(Some(_chunk_size as usize), None, None)
                                     .unwrap(),
                             )
-                            /* .local_work_size(
-                                ocl::SpatialDims::new(Some(32 as usize), Some(1 as usize), None)
-                                    .unwrap(),
-                            )*/
+                            .local_work_size(kernel.default_local_work_size())
                             .queue(&queue)
                             .enq()
                             .unwrap();
 
-                        //in_out_buf.read(&mut in_out).queue(&queue).enq().unwrap();
-                        //ln_count_buf.read(&mut ln_count).queue(&queue).enq().unwrap();
-                        ln_buf.read(&mut ln).queue(&queue).enq().unwrap();
-                        pairs_count_buf
-                            .read(&mut pairs_count)
-                            .queue(&queue)
-                            .enq()
-                            .unwrap();
-                        pairs_buf.read(&mut pairs).queue(&queue).enq().unwrap();
+                        output_buf.read(&mut output).queue(&queue).enq().unwrap();
+                        /*pairs_count_buf
+                        .read(&mut pairs_count)
+                        .queue(&queue)
+                        .enq()
+                        .unwrap();*/
 
-                        let mut pairs = pairs[0..pairs_count[0] as usize].to_vec();
-                        pairs.sort();
-                        let pairs_buf = unsafe {
-                            ocl::Buffer::builder()
-                                .context(&context)
-                                .flags(flags::MEM_WRITE_ONLY)
-                                .use_host_slice(&pairs)
-                                .len(pairs.len())
-                                .build()
-                                .unwrap()
-                        };
-
-                        let mut pairs2 = vec![Uint2::default(); pairs_count[0] as usize];
-                        let pairs2_buf = unsafe {
-                            ocl::Buffer::builder()
-                                .context(&context)
-                                .flags(flags::MEM_WRITE_ONLY)
-                                .use_host_slice(&pairs2)
-                                .len(pairs2.len())
-                                .build()
-                                .unwrap()
-                        };
-
-                        kernel_parts.set_arg("in_out", &in_out_buf).unwrap();
-                        kernel_parts.set_arg("pairs", &pairs_buf).unwrap();
-                        kernel_parts.set_arg("pairs2", &pairs2_buf).unwrap();
-
-                        kernel_parts
-                            .cmd()
-                            .global_work_size(
-                                ocl::SpatialDims::new(Some(pairs_count[0] as usize), None, None)
-                                    .unwrap(),
-                            )
-                            /* .local_work_size(
-                                ocl::SpatialDims::new(Some(32 as usize), Some(1 as usize), None)
-                                    .unwrap(),
-                            )*/
-                            .queue(&queue)
-                            .enq()
-                            .unwrap();
-
-                        //in_out_buf.read(&mut in_out).queue(&queue).enq().unwrap();
-                        //ln_count_buf.read(&mut ln_count).queue(&queue).enq().unwrap();
-
-                        pairs2_buf.read(&mut pairs2).queue(&queue).enq().unwrap();
-
-                        let pair = &_input[pairs2[5][0] as usize..pairs2[5][1] as usize];
-
-                        //println!("pair {:?}",  pair.iter().map(|x| *x as char).collect::<String>());
-
-                        //
-
-                        /*
-                        ln.sort();
-                        //println!("ln {:?}", ln);
-                        let mut pairs = pairs[0..pairs_count[0] as usize].to_vec();
-                        //let mut pairs:Vec<&u32> = pairs.iter().filter(|x| *x > &0).collect();
-                        pairs.sort();
-
-                        let mut last_pair_idx = 0;
-                        let mut pair_indexes = vec![];
-                        for pair_idx in pairs {
-                            let mut msg_idx = 0;
-                            for i in &ln {
-                                //println!("compoare {} {}", pair_idx, i);
-                                if pair_idx as u32 >= *i {
-                                    break;
-                                }
-                                msg_idx += 1;
-                            }
-
-                            let pos = Positions {
-                                start: last_pair_idx,
-                                end: pair_idx as usize,
-                                idx: msg_idx,
-                            };
-
-                            pair_indexes.push(pos);
-
-                            last_pair_idx = pair_idx as usize + 1;
-                        }
-
-                        pair_indexes.par_iter().for_each(|pos| {
-                            /*let pair = _input[*start..*end]
-                                .to_vec()
-                                .iter()
-                                .map(|x| *x as char)
-                                .collect::<String>();
-                            println!("pair {}", pair);*/
-
-                            let pair = &_input[pos.start..pos.end];
-
-                            //println!("msg {}, pair {:?}", pos.idx, pair);
-                        });*/
-                        //println!("pairs {} ", pairs.iter().filter(|x| *x > &0).count());
-
-                        //std::process::exit(1);
-                        /*let line_breaks: Vec<usize> = in_out
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, x)| if *x == 1 { Some(i) } else { None })
-                        .collect();&*/
-                        //println!("line_breaks {:?}", line_breaks);
-
-                        /*
-
-                        let line_breaks=ln;
-                        let mut last_ln = 0;
-                        for ln in line_breaks {
-                            let indexes = &in_out[last_ln..ln as usize];
-                            let line = &_input[last_ln..ln as usize];
-
-                            match s.send((indexes.to_vec(), line.to_vec())) {
-                                Ok(()) => {}
-                                Err(e) => {
-                                    println!("Error sending");
-                                }
-                            }
-                            /*println!(
-                                "line {}",
-                                line.iter().map(|x| *x as char).collect::<String>()
-                            );*/
-                            //println!("indexes {:?}", indexes);
-                            /*
-                                                        let part_breaks: Vec<usize> = indexes
-                                                            .iter()
-                                                            .enumerate()
-                                                            .filter_map(|(i, x)| if *x == 16 { Some(i) } else { None })
-                                                            .collect();
-
-                                                        let mut last_pa = 0;
-                                                        for pa in part_breaks {
-                                                            let pa_indexes = &indexes[last_pa..pa];
-                                                            let part = &line[last_pa..pa];
-
-                                                            let pos = pa_indexes
-                                                                .iter()
-                                                                .enumerate()
-                                                                .filter_map(|(i, x)| if *x == 8 { Some(i) } else { None })
-                                                                .collect::<Vec<usize>>();
-                                                            if pos.len() > 0 {
-                                                                let pos = pos[0];
-                                                                let key = &part[..pos];
-                                                                let value = &part[pos..];
-                            //let key  =String::from_utf8(key.to_vec()).unwrap();
-                            //let value = String::from_utf8(value.to_vec()).unwrap() ;
-                                                                /*println!(
-                                                                    "kv {}:{}",
-                                                                    String::from_utf8(key.to_vec()).unwrap(),
-                                                                    String::from_utf8(value.to_vec()).unwrap() //part.iter().map(|x| *x as char).collect::<String>()
-                                                                );*/
-                                                            }
-                                                            //println!("pa_indexes {:?}", pa_indexes);
-
-                                                            last_pa = pa + 1;
-                                                        }
-                            */
-                            //println!("part_breaks {:?}", part_breaks);
-
-                            last_ln = ln as usize + 1;
-                        }*/
-
-                        //in_out.par_split(|x| *x == 1).for_each(|line|{
-
-                        //for part in line.split(|x| *x == 16)  {
-                        //let keypair = part.split(|x|*x == 8).map(|x| x.to_vec()).collect::<Vec<Vec<u8>>>();
-                        //println!("keypair {:?}",keypair);
-                        //let key = keypair[0].iter().map(|x| *x as char).collect::<String>();
-                        //let value = keypair[1].iter().map(|x| *x as char).collect::<String>();
-
-                        //}
-
-                        //  });
-
-                        let mut last_ln = 0;
-                        let mut last_part = 0;
-                        //let mut last = vec![];
-                        //let mut last_idx = vec![];
-                        //let mut msg = vec![];
-                        //let mut part = vec![];
-                        //println!("in {:?}", in_out);
-                        /*for i in 0..in_out.len() {
-
-                            let current = in_out[i].clone();
-                            if current == 1 {
-                                //println!("last {}", last.iter().map(|x| *x as char).collect::<String>());
-                                //println!("last_idx {:?}", last_idx);
-
-                                let pos:Vec<usize> = last_idx.iter().enumerate().filter_map(|(i,x)| if *x ==16 { Some (i)} else {None}).collect();
-                                //println!("pos {:?}",pos);
-                                //we reached the end of the message
-                                //msg.push(part.clone());
-                                //part.clear();
-                                last_ln = i;
-
-                            } else {
-                                last.push(_input[i]);
-                                last_idx.push(in_out[i]);
-                            }
-                        }*/
-                    }
-                    /*_input.par_split(|x|*x=='\n' as u8).for_each(|pos| {
-                        if pos.len() == 0 {
-                            return;
-                        }
-                        //let msg = work_stdin[idx];
-                        //println!("msg {:?}", msg);
-                        //println!("pos {:?}", pos);
-
-
-                    }); */
-
-                    //println!("{:?}", in_out);
-
-                    /*
-                        let mut msg_idx = 0;
-
-                        for msg in in_out.split(|x| *x == 1) {
-                            if msg.len() == 0 {
-                                continue;
-                            }
-
-                            let pos: Vec<usize> = msg
-                                .iter()
-                                .enumerate()
-                                .filter_map(|(idx, val)| if *val == 8 { Some(idx) } else { None })
-                                .collect();
-
-                            let mut json = "{".to_string();
-                            for (i, p) in pos.iter().enumerate() {
-                                let mut start = 0;
-                                let mut end = 0;
-
-                                for i in (0..*p).rev() {
-                                    if msg[i] == 4 || msg[i] == 2 {
-                                        start = i + 1;
-                                        break;
+                        output.par_chunks(key_block).enumerate().for_each(|(idx,chunk)| {
+                            let mut chunk = chunk.to_vec();
+                            chunk.retain(|x| x[1] > 0);
+                            //let header = &input[starts[idx] as usize..chunk[chunk.len()-1][0] as usize];
+                            //println!("header {}", header.iter().map(|x| *x as char).collect::<String>());
+                            for pair in chunk {
+                                let key = &input[pair[0] as usize..pair[2] as usize];
+                                let start = pair[2] + 1;
+                                let end = {
+                                    if start > pair[1] {
+                                        start
+                                    } else {
+                                        pair[1]
                                     }
-                                }
-
-                                if i + 1 >= pos.len() {
-                                    end = work_stdin[msg_idx].len();
-                                } else {
-                                    let last = pos[i + 1];
-                                    for i in (*p..last).rev() {
-                                        if msg[i] == 2 {
-                                            end = i;
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                json.push_str("\"");
-                                json.push_str(&work_stdin[msg_idx][start..*p]);
-                                json.push_str("\":");
-                                json.push_str("\"");
-                                json.push_str(&work_stdin[msg_idx][*p + 1..end]);
-                                json.push_str("\",");
+                                };
+                                let value = &input[start as usize..end as usize];
+                                //}
+                                //println!("{:?}:{:?}", key, value);
+                                /*println!(
+                                    "{:?}:{:?}",
+                                    key.iter().map(|x| *x as char).collect::<String>(),
+                                    value.iter().map(|x| *x as char).collect::<String>()
+                                );*/
                             }
-                            json.truncate(json.len() - 1);
-                            json.push('}');
-                            //println!("{}", json);
-                            msg_idx += 1;
-                        }
+                        });
                     }
-                     */
+
                     let duration = start.elapsed();
                     total_counter += chunk_size;
-                    total_bytes += work_size as f32 / 1024.0 / 1024.0 / 1024.0;
+                    total_bytes += input.len() as f32 / 1024.0 / 1024.0 / 1024.0;
 
                     counter += chunk_size;
-                    bytes += work_size;
+                    bytes += input.len();
 
                     if duration > Duration::from_secs(STAT_INTERVAL) {
                         eprintln!(
@@ -583,11 +313,19 @@ pub fn get_device_count() -> usize {
     devices.len()
 }
 
-fn flatten_strings(ss: impl Iterator<Item = &'static str>) -> Vec<u8> {
-    let mut res = Vec::new();
+fn flatten_strings(ss: impl Iterator<Item = &'static str>) -> (Vec<u8>, (Vec<u32>, Vec<u32>)) {
+    let mut res = vec![];
+    let mut lengths = vec![];
+    let mut starts = vec![];
+
+    let mut start = 0;
     for s in ss {
-        res.extend(s.as_bytes());
-        res.extend(['\n' as u8]);
+        let s = s.as_bytes();
+        res.extend(s);
+        res.push('\n' as u8);
+        lengths.push(s.len() as u32);
+        starts.push(start as u32);
+        start += s.len();
     }
-    res
+    (res, (lengths, starts))
 }
