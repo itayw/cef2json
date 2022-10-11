@@ -36,48 +36,48 @@ fn main() {
         devices.len()
     );
     let src = r#"
-                __kernel void kernel_parser(__global uchar * input, __global uint * lengths, __global uint * starts, __global uint3 * output, __global uint * pair_counts) {
-                    ulong idx = get_global_id(0);
-                    
-                    uint start = starts[idx];
-                    uint length = lengths[idx];
-                    uint end = start + length;
-                    uint key_block = 50;
+        __kernel void kernel_parser(__global uchar * input, __global uint * lengths, __global uint * starts, __global uint3 * output, __global uint * pair_counts) {
+            ulong idx = get_global_id(0);
+            
+            uint start = starts[idx];
+            uint length = lengths[idx];
+            uint end = start + length;
+            uint key_block = 50;
 
-                    uint pair_count = 0;
-                    uint pair_start = 0;
-                    uint pair_end = end;
-                    uint pair_eq = 0;
-                    bool looking_for_pair_start = false;
+            uint pair_count = 0;
+            uint pair_start = 0;
+            uint pair_end = end;
+            uint pair_eq = 0;
+            bool looking_for_pair_start = false;
 
-                    for (int i = end; i > start ; i--) {
-                        if (input[i] == '=' && input[i-1] != '\\') {
-                            //we have an equal sign, let's look for a the complete keypair
-                            pair_eq = i;
-                            looking_for_pair_start = 1;
-                        }
-                        if (looking_for_pair_start && (input[i] == ' ' || input[i] == '|')) {
-                            pair_start = i + 1;
-
-                            //we have a keypair, let's push it
-                            uint pos = (key_block * idx) + pair_count;
-
-                            uint3 result = {pair_start, pair_end, pair_eq};
-                            output[pos] = result;
-                            
-                            //init our vars for the next lookup
-                            looking_for_pair_start = false;
-                            pair_end = i;
-                            pair_start = 0;
-                            pair_eq = 0;
-
-                            pair_count++;
-                        }
-                    }
-
-                    pair_counts[idx] = pair_count;
+            for (int i = end; i > start ; i--) {
+                if (input[i] == '=' && input[i-1] != '\\') {
+                    //we have an equal sign, let's look for a the complete keypair
+                    pair_eq = i;
+                    looking_for_pair_start = 1;
                 }
-            "#;
+                if (looking_for_pair_start && (input[i] == ' ' || input[i] == '|')) {
+                    pair_start = i + 1;
+
+                    //we have a keypair, let's push it
+                    uint pos = (key_block * idx) + pair_count;
+
+                    uint3 result = {pair_start, pair_end, pair_eq};
+                    output[pos] = result;
+                    
+                    //init our vars for the next lookup
+                    looking_for_pair_start = false;
+                    pair_end = i;
+                    pair_start = 0;
+                    pair_eq = 0;
+
+                    pair_count++;
+                }
+            }
+
+            pair_counts[idx] = pair_count;
+        }
+    "#;
     let src_cstring = CString::new(src).unwrap();
 
     devices
@@ -198,7 +198,7 @@ fn main() {
                                 ocl::SpatialDims::new(Some(_chunk_size as usize), None, None)
                                     .unwrap(),
                             )
-                            .local_work_size(kernel.default_local_work_size())
+                            //.local_work_size(kernel.default_local_work_size())
                             .queue(&queue)
                             .enq()
                             .unwrap();
@@ -210,31 +210,38 @@ fn main() {
                         .enq()
                         .unwrap();*/
 
-                        output.par_chunks(key_block).enumerate().for_each(|(idx,chunk)| {
-                            let mut chunk = chunk.to_vec();
-                            chunk.retain(|x| x[1] > 0);
-                            //let header = &input[starts[idx] as usize..chunk[chunk.len()-1][0] as usize];
-                            //println!("header {}", header.iter().map(|x| *x as char).collect::<String>());
-                            for pair in chunk {
-                                let key = &input[pair[0] as usize..pair[2] as usize];
-                                let start = pair[2] + 1;
-                                let end = {
-                                    if start > pair[1] {
-                                        start
-                                    } else {
-                                        pair[1]
-                                    }
-                                };
-                                let value = &input[start as usize..end as usize];
-                                //}
-                                //println!("{:?}:{:?}", key, value);
-                                /*println!(
-                                    "{:?}:{:?}",
-                                    key.iter().map(|x| *x as char).collect::<String>(),
-                                    value.iter().map(|x| *x as char).collect::<String>()
-                                );*/
-                            }
-                        });
+                        output
+                            .par_chunks(key_block)
+                            .enumerate()
+                            .for_each(|(idx, chunk)| {
+                                let mut chunk = chunk.to_vec();
+                                chunk.retain(|x| x[1] > 0);
+                                let headers = &input
+                                    [starts[idx] as usize..chunk[chunk.len() - 1][0] as usize]
+                                    .split(|x| *x == '|' as u8)
+                                    .collect::<Vec<&[u8]>>();
+                                //println!("headers {:?}", headers);
+
+                                for pair in chunk {
+                                    let key = &input[pair[0] as usize..pair[2] as usize];
+                                    let start = pair[2] + 1;
+                                    let end = {
+                                        if start > pair[1] {
+                                            start
+                                        } else {
+                                            pair[1]
+                                        }
+                                    };
+                                    let value = &input[start as usize..end as usize];
+                                    //}
+                                    //println!("{:?}:{:?}", key, value);
+                                    /*println!(
+                                        "{:?}:{:?}",
+                                        key.iter().map(|x| *x as char).collect::<String>(),
+                                        value.iter().map(|x| *x as char).collect::<String>()
+                                    );*/
+                                }
+                            });
                     }
 
                     let duration = start.elapsed();
@@ -322,7 +329,7 @@ fn flatten_strings(ss: impl Iterator<Item = &'static str>) -> (Vec<u8>, (Vec<u32
     for s in ss {
         let s = s.as_bytes();
         res.extend(s);
-        res.push('\n' as u8);
+        //res.push('\n' as u8);
         lengths.push(s.len() as u32);
         starts.push(start as u32);
         start += s.len();
