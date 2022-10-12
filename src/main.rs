@@ -31,6 +31,7 @@ fn main() {
         };
     }
 
+    let devices:Vec<ocl::core::DeviceId> = devices.iter().map(|x| *x).take(1).collect();
     println!(
         "Found {} GPU devices, will use only 1 for this POC, compiling kernel...",
         devices.len()
@@ -80,11 +81,12 @@ fn main() {
     "#;
     let src_cstring = CString::new(src).unwrap();
 
-    devices
-        .into_par_iter()
+    //devices
+       // .into_par_iter()
         //.skip(1)
-        .take(1)
-        .for_each(move |device_id| {
+        //.take(1)
+        //.for_each(move |device_id| {
+            let device_id = devices[0];
             let mut start = Instant::now();
 
             let mut total_counter = 0;
@@ -210,10 +212,11 @@ fn main() {
                         .enq()
                         .unwrap();*/
 
-                        output
-                            .par_chunks(key_block)
-                            .enumerate()
-                            .for_each(|(idx, chunk)| {
+                        //output
+                        //    .par_chunks(key_block)
+                        //    .enumerate()
+                        //    .for_each(|(idx, chunk)| {
+                            for (idx,chunk) in output.chunks(key_block).enumerate(){
                                 let mut chunk = chunk.to_vec();
                                 chunk.retain(|x| x[1] > 0);
                                 let headers = &input
@@ -241,7 +244,8 @@ fn main() {
                                         value.iter().map(|x| *x as char).collect::<String>()
                                     );*/
                                 }
-                            });
+                            }
+                        //    });
                     }
 
                     let duration = start.elapsed();
@@ -265,7 +269,7 @@ fn main() {
                     }
                 }
             }
-        });
+        //});
     //println!("GPU done, elapsed: {:?}ms.", start.elapsed().as_millis());
 }
 
@@ -302,6 +306,7 @@ lazy_static! {
     };
 }
 
+#[inline(always)]
 fn get_work(chunk_size: u32) -> Vec<&'static str> {
     CEF_SAMPLE[0..chunk_size as usize].to_vec()
 }
@@ -320,6 +325,7 @@ pub fn get_device_count() -> usize {
     devices.len()
 }
 
+#[inline(always)]
 fn flatten_strings(ss: impl Iterator<Item = &'static str>) -> (Vec<u8>, (Vec<u32>, Vec<u32>)) {
     let mut res = vec![];
     let mut lengths = vec![];
