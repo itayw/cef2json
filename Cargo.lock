@@ -53,21 +53,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
-name = "cef2hashmap"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2691cd78e1d08e1bcacd1de1879ffdab1d376ce872a86d0ed75bdd843b49dc3"
-
-[[package]]
 name = "cef2json"
 version = "1.0.0"
 dependencies = [
- "cef2hashmap",
- "crossbeam-channel 0.5.6",
- "crossbeam-queue 0.3.6",
  "lazy_static",
+ "libc",
  "num-format",
  "ocl",
+ "opencl3",
  "rand 0.8.5",
  "rayon",
 ]
@@ -94,6 +87,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cl3"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e014961508a981c7ef28a65d0c965af7061593b4db50cff83952c62931b39ec"
+dependencies = [
+ "libc",
+ "opencl-sys",
+]
+
+[[package]]
 name = "crossbeam"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -103,7 +106,7 @@ dependencies = [
  "crossbeam-channel 0.4.4",
  "crossbeam-deque 0.7.4",
  "crossbeam-epoch 0.8.2",
- "crossbeam-queue 0.2.3",
+ "crossbeam-queue",
  "crossbeam-utils 0.7.2",
 ]
 
@@ -186,16 +189,6 @@ dependencies = [
  "cfg-if 0.1.10",
  "crossbeam-utils 0.7.2",
  "maybe-uninit",
-]
-
-[[package]]
-name = "crossbeam-queue"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cd42583b04998a5363558e5f9291ee5a5ff6b49944332103f251e7479a82aa7"
-dependencies = [
- "cfg-if 1.0.0",
- "crossbeam-utils 0.8.5",
 ]
 
 [[package]]
@@ -502,6 +495,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4072920739958adeec5abedec51af70febc58f7fff0601aaa0827c1f3c8fefd"
 dependencies = [
  "num",
+]
+
+[[package]]
+name = "opencl-sys"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e75919008b8ed7ce9620e2b3580c648db40c7f564a368f271b2647145046d8ba"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "opencl3"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcf817a6312f2e87941d18b716f79892f217ab523102108a89c698822ab4ec4c"
+dependencies = [
+ "cl3",
+ "libc",
 ]
 
 [[package]]
